@@ -18,10 +18,27 @@ UNIQVER=$(echo ${VIAL_VER} ${WEB_VER} ${VIA_STACK_VER} | sha256sum | awk '{print
 cp ../icon.png .
 cp -r ../../deps/cpython/builddir/emscripten-browser/usr .
 cp ../../via-keymap-precompiled/via_keyboard_stack.json usr/local/via_keyboards.json
-cp ../../vial-gui/src/main/resources/base/qmk_settings.json usr/local
-cp ../../vial-gui/src/build/settings/base.json usr/local/build_settings.json
+
+# Copy qmk_settings.json - check both possible locations
+if [ -f "../../vial-gui/src/main/python/resources/base/qmk_settings.json" ]; then
+    cp ../../vial-gui/src/main/python/resources/base/qmk_settings.json usr/local
+elif [ -f "../../vial-gui/src/main/resources/base/qmk_settings.json" ]; then
+    cp ../../vial-gui/src/main/resources/base/qmk_settings.json usr/local
+fi
+
+# Copy build settings - check both possible locations
+if [ -f "../../vial-gui/src/main/python/resources/settings/base.json" ]; then
+    cp ../../vial-gui/src/main/python/resources/settings/base.json usr/local/build_settings.json
+elif [ -f "../../vial-gui/src/build/settings/base.json" ]; then
+    cp ../../vial-gui/src/build/settings/base.json usr/local/build_settings.json
+fi
+
+# Copy all Python source files
 cp -r ../../vial-gui/src/main/python/* usr/local/lib/python3.11
+
+# Copy simpleeval (required dependency)
 cp ../simpleeval.py usr/local/lib/python3.11
+
 emcc \
     --preload-file="./usr/local" \
     -I ../../deps/cpython/Include/ \
