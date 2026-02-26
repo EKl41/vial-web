@@ -173,13 +173,6 @@ static volatile int       dfu_status_error  = 0;
 // JSON payload: {"status":"progress","pct":0.5} | {"status":"done"} | {"status":"error","msg":"..."}
 static char               dfu_status_buf[512];
 
-// Called from JS to get the WASM address of dfu_status_ready so JS can
-// Atomics.notify() after posting the status, waking emscripten_futex_wait().
-EMSCRIPTEN_KEEPALIVE
-int vialglue_dfu_status_ready_addr(void) {
-    return (int)(uintptr_t)&dfu_status_ready;
-}
-
 void vialglue_set_dfu_status(const char *json) {
     strncpy(dfu_status_buf, json, sizeof(dfu_status_buf) - 1);
     dfu_status_buf[sizeof(dfu_status_buf) - 1] = '\0';

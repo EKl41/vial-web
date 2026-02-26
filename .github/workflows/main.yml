@@ -26,13 +26,30 @@ jobs:
         git clone --branch vial-keychron https://github.com/tymon3310/vial-gui.git
         git clone https://github.com/vial-kb/via-keymap-precompiled.git
 
+    - name: Cache emsdk
+      id: cache-emsdk
+      uses: actions/cache@v4
+      with:
+        path: emsdk
+        key: emsdk-891b4491419c42f9d2b9f97c47d1043b26dfd3e5-3.1.10
+
     - name: Setup Emscripten
+      if: steps.cache-emsdk.outputs.cache-hit != 'true'
       run: ./fetch-emsdk.sh
 
+    - name: Cache built dependencies
+      id: cache-deps
+      uses: actions/cache@v4
+      with:
+        path: deps
+        key: deps-${{ hashFiles('version.sh') }}
+
     - name: Fetch sources
+      if: steps.cache-deps.outputs.cache-hit != 'true'
       run: ./fetch-deps.sh
 
     - name: Build dependencies
+      if: steps.cache-deps.outputs.cache-hit != 'true'
       run: ./build-deps.sh
 
     - name: Build vial-web
