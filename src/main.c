@@ -221,18 +221,37 @@ static PyObject * vialglue_dfu_request_usb(PyObject *self, PyObject *args) {
     return PyLong_FromLong(0);
 }
 
-// Called from Python after a web DFU flash to reconnect the keyboard via WebHID.
-// Triggers navigator.hid.requestDevice() on the main thread and blocks (spinlock)
-// until the main thread posts back a dfu_status of {"status":"reconnected"} or
-// {"status":"error","msg":"..."}.
-static PyObject * vialglue_request_reconnect(PyObject *self, PyObject *args) {
+// Called from Python: dfu_show_usb_picker() -> None
+// Shows a native browser button overlay so the user can trigger
+// navigator.usb.requestDevice() via a real user gesture (button click).
+static PyObject * vialglue_dfu_show_usb_picker(PyObject *self, PyObject *args) {
+    EM_ASM({
+        postMessage({cmd: "dfu_show_usb_picker"});
+    });
+
+    return PyLong_FromLong(0);
+}
+
+// Called from Python: dfu_show_hid_picker() -> None
+// Shows a native browser button overlay so the user can trigger
+// navigator.hid.requestDevice() via a real user gesture (button click).
+// Fire-and-forget: returns immediately; call request_reconnect() afterwards
+// to block until the user clicks the button and the result is posted back.
+static PyObject * vialglue_dfu_show_hid_picker(PyObject *self, PyObject *args) {
     dfu_status_ready = 0;
     dfu_status_error = 0;
 
     EM_ASM({
-        postMessage({cmd: "dfu_request_reconnect"});
+        postMessage({cmd: "dfu_show_hid_picker"});
     });
 
+    return PyLong_FromLong(0);
+}
+
+// Called from Python after dfu_show_hid_picker() to wait for the WebHID
+// reconnect result.  Blocks (spinlock) until the main thread posts back
+// {"status":"reconnected"} or {"status":"error","msg":"..."}.
+static PyObject * vialglue_request_reconnect(PyObject *self, PyObject *args) {
     // Spinlock: wait for main thread to post back the result
     while (!dfu_status_ready) { /* spinlock */ }
     dfu_status_ready = 0;
@@ -267,6 +286,8 @@ static PyMethodDef VialglueMethods[] = {
     {"dfu_flash_start",    vialglue_dfu_flash_start,    METH_VARARGS, ""},
     {"dfu_flash_status",   vialglue_dfu_flash_status,   METH_VARARGS, ""},
     {"dfu_request_usb",    vialglue_dfu_request_usb,    METH_VARARGS, ""},
+    {"dfu_show_usb_picker", vialglue_dfu_show_usb_picker, METH_VARARGS, ""},
+    {"dfu_show_hid_picker", vialglue_dfu_show_hid_picker, METH_VARARGS, ""},
     {"request_reconnect",  vialglue_request_reconnect,  METH_VARARGS, ""},
     {NULL, NULL, 0, NULL}
 };
