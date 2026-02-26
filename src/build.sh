@@ -97,7 +97,7 @@ emcc \
     -pthread \
     -sDISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR=0 \
     -s EXTRA_EXPORTED_RUNTIME_METHODS=\["UTF16ToString","stringToUTF16","getValue","setValue"\] \
-    -sEXPORTED_FUNCTIONS=\["_PyRun_SimpleString","_vialglue_set_response","_vialglue_set_response_error","_vialglue_set_device_desc","_main"\] \
+    -sEXPORTED_FUNCTIONS=\["_PyRun_SimpleString","_vialglue_set_response","_vialglue_set_response_error","_vialglue_set_device_desc","_vialglue_set_dfu_status","_main"\] \
     -sPROXY_TO_PTHREAD \
     -sOFFSCREENCANVAS_SUPPORT \
     -L ../../deps/xz-${XZ_VER}/prefix/lib/ \
@@ -105,6 +105,7 @@ emcc \
     ../main.c
 cp ../index.html .
 cp ../coi-serviceworker.js .
+cp ../dfu.js .
 cat ../worker.js >> main-${UNIQVER}.worker.js
 sed -i 's+err("worker sent an unknown command+my_onmessage(e);return;err("worker sent an unknown command/+g' main-${UNIQVER}.js
 

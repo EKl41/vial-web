@@ -134,10 +134,18 @@ body {
             document.getElementById("startup_btn").disabled = false;
         } else if (e.data.cmd == "load_layout") {
             loadLayout();
+        } else if (e.data.cmd == "load_firmware_bin") {
+            loadFirmwareBin();
         } else if (e.data.cmd == "save_layout") {
             saveLayout(e.data.layout);
         } else if (e.data.cmd == "fatal_error") {
             alert(e.data.msg);
+        } else if (e.data.cmd == "dfu_request_usb") {
+            dfuRequestUsb();
+        } else if (e.data.cmd == "dfu_flash_start") {
+            dfuFlash(e.data.firmware);
+        } else if (e.data.cmd == "dfu_request_reconnect") {
+            dfuReconnectHid();
         }
     }
 
@@ -173,6 +181,47 @@ body {
         });
     }
 
+    const FIRMWARE_BIN_OPTIONS = {
+        types: [
+            {
+                description: "Firmware binary",
+                accept: { "application/octet-stream": [".bin"] },
+            },
+        ],
+        excludeAcceptAllOption: false,
+        multiple: false,
+    };
+
+    async function loadFirmwareBin() {
+        if (!window.showOpenFilePicker) {
+            alert("File loading API unavailable. Please use a newer browser.");
+            return;
+        }
+
+        let handle;
+        try {
+            [handle] = await window.showOpenFilePicker(FIRMWARE_BIN_OPTIONS);
+        } catch(e) {
+            // User cancelled
+            return;
+        }
+
+        if (!handle) return;
+
+        const file = await handle.getFile();
+        const arrayBuffer = await file.arrayBuffer();
+        const u8 = new Uint8Array(arrayBuffer);
+
+        // Allocate in WASM heap and call Python callback
+        var u8arr = Array.from(u8);
+        // Deliver bytes directly as a JSON array — no heap allocation needed
+        PThread.runningWorkers[0].postMessage({
+            cmd: "py",
+            payload: "import webmain;webmain.window.dfu_flasher.on_web_firmware_loaded(" +
+                     JSON.stringify(file.name) + ", bytes(" + JSON.stringify(u8arr) + "))",
+        });
+    }
+
     async function saveLayout(layout) {
         if (window.showSaveFilePicker) {
             // This shows a file chooser dialog. It's a nicer experience
@@ -196,6 +245,120 @@ body {
             } else {
                 download.click();
             }
+        }
+    }
+
+    // ── WebUSB DFU helpers ─────────────────────────────────────────────────
+
+    var g_dfu_device = null;
+
+    function dfuStatusToWorker(json) {
+        PThread.runningWorkers[0].postMessage({cmd: "dfu_status", json: json});
+    }
+
+    // Triggered by dfu_request_usb from Python.  Asks the user to select the
+    // DFU device then stores it in g_dfu_device.  Reports result via dfu_status.
+    async function dfuRequestUsb() {
+        try {
+            const usbDevice = await navigator.usb.requestDevice({
+                filters: [{classCode: 0xFE, subclassCode: 0x01}]
+            });
+            const ifaces = dfu.findDeviceDfuInterfaces(usbDevice);
+            if (ifaces.length === 0) {
+                dfuStatusToWorker(JSON.stringify({status: "error", msg: "No DFU interface found on selected device"}));
+                return;
+            }
+            // Pick the DfuSe (protocol 2) interface if available, otherwise first one
+            const iface = ifaces.find(i => i.alternate.interfaceProtocol === 2) || ifaces[0];
+            const isDfuSe = iface.alternate.interfaceProtocol === 2;
+            g_dfu_device = isDfuSe ? new dfuse.Device(usbDevice, iface)
+                                   : new dfu.Device(usbDevice, iface);
+            g_dfu_device.logMsg = function(msg) {
+                dfuStatusToWorker(JSON.stringify({status: "log", msg: msg}));
+            };
+            g_dfu_device.logProgress = function(sent, total) {
+                dfuStatusToWorker(JSON.stringify({status: "progress", pct: sent / total}));
+            };
+            dfuStatusToWorker(JSON.stringify({status: "usb_ready"}));
+        } catch(e) {
+            dfuStatusToWorker(JSON.stringify({status: "error", msg: "USB device selection failed: " + e.message}));
+        }
+    }
+
+    // Triggered by dfu_flash_start from Python.  firmware is a Uint8Array.
+    async function dfuFlash(firmware) {
+        if (!g_dfu_device) {
+            dfuStatusToWorker(JSON.stringify({status: "error", msg: "No DFU device selected"}));
+            return;
+        }
+        try {
+            await g_dfu_device.open();
+
+            // Read transfer size from DFU functional descriptor (default 2048)
+            let transferSize = 2048;
+            try {
+                const cfgData = await g_dfu_device.readConfigurationDescriptor(0);
+                for (let d of cfgData.descriptors || []) {
+                    if (d.bDescriptorType === 0x21 && d.wTransferSize) {
+                        transferSize = d.wTransferSize;
+                    }
+                }
+            } catch {}
+
+            // Abort any previous DFU operation
+            try { await g_dfu_device.abort(); } catch {}
+            try { await g_dfu_device.poll_until(s => s === dfu.dfuIDLE || s === dfu.dfuDNLOAD_IDLE); } catch {}
+            try { await g_dfu_device.clearStatus(); } catch {}
+
+            await g_dfu_device.do_download(transferSize, firmware.buffer, false);
+
+            dfuStatusToWorker(JSON.stringify({status: "done"}));
+        } catch(e) {
+            dfuStatusToWorker(JSON.stringify({status: "error", msg: e.message}));
+        } finally {
+            try { await g_dfu_device.close(); } catch {}
+            g_dfu_device = null;
+        }
+    }
+
+    // Called after a successful DFU flash.  Pops a WebHID picker so the user
+    // can reconnect the freshly-flashed keyboard, then wires up the input report
+    // handler exactly like connect() does and notifies Python via dfu_status.
+    async function dfuReconnectHid() {
+        try {
+            var devices = await navigator.hid.requestDevice({filters: [{usagePage: 0xFF60, usage: 0x61}]});
+            if (!devices || devices.length !== 1) {
+                dfuStatusToWorker(JSON.stringify({status: "error", msg: "No HID device selected"}));
+                return;
+            }
+            var device = devices[0];
+            await device.open();
+            device.oninputreport = function(ev) {
+                clearTimeout(g_read_timeout);
+                var ptr = _malloc(32);
+                for (var i = 0; i < 32; ++i) {
+                    setValue(ptr + i, ev.data.getUint8(i), "i8");
+                }
+                _vialglue_set_response(ptr);
+                _free(ptr);
+            };
+            g_device = device;
+            var device_desc = {
+                path: "/webhid",
+                vendor_id: device.vendorId,
+                product_id: device.productId,
+                serial_number: "",
+                release_number: 1,
+                manufacturer_string: "",
+                product_string: device.productName,
+                usage_page: 65376,
+                usage: 97,
+                interface_number: 1
+            };
+            _vialglue_set_device_desc(allocateUTF8(JSON.stringify(device_desc)));
+            dfuStatusToWorker(JSON.stringify({status: "reconnected"}));
+        } catch(e) {
+            dfuStatusToWorker(JSON.stringify({status: "error", msg: "Reconnect failed: " + e.message}));
         }
     }
 
@@ -266,6 +429,7 @@ body {
     };
 </script>
 
+<script src="dfu.js"></script>
 <script src="main-@UNIQVER@.js"></script>
 
 </body>

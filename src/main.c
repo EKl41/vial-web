@@ -141,6 +141,14 @@ static PyObject * vialglue_load_layout(PyObject *self, PyObject *args) {
     return PyLong_FromLong(0);
 }
 
+static PyObject * vialglue_load_firmware_bin(PyObject *self, PyObject *args) {
+    EM_ASM({
+        postMessage({cmd: "load_firmware_bin"});
+    });
+
+    return PyLong_FromLong(0);
+}
+
 static PyObject * vialglue_save_layout(PyObject *self, PyObject *args) {
     const uint8_t *data;
 
@@ -152,6 +160,83 @@ static PyObject * vialglue_save_layout(PyObject *self, PyObject *args) {
     }, data);
 
     return PyLong_FromLong(0);
+}
+
+// ── DFU flash bridge ────────────────────────────────────────────────────────
+// Python calls dfu_flash_start(firmware_bytes) to kick off a WebUSB DFU flash.
+// It then calls dfu_flash_status() in a loop to get progress/done/error.
+// The main thread (index.html) posts back {cmd:"dfu_status", json:"..."} to the
+// worker, which calls vialglue_set_dfu_status() below.
+
+static volatile int       dfu_status_ready  = 0;
+static volatile int       dfu_status_error  = 0;
+// JSON payload: {"status":"progress","pct":0.5} | {"status":"done"} | {"status":"error","msg":"..."}
+static char               dfu_status_buf[512];
+
+void vialglue_set_dfu_status(const char *json) {
+    strncpy(dfu_status_buf, json, sizeof(dfu_status_buf) - 1);
+    dfu_status_buf[sizeof(dfu_status_buf) - 1] = '\0';
+    dfu_status_error = 0;
+    dfu_status_ready = 1;
+}
+
+// Called from Python: dfu_flash_start(firmware_bytes) -> None
+// Sends the firmware buffer to the main thread to begin WebUSB DFU.
+static PyObject * vialglue_dfu_flash_start(PyObject *self, PyObject *args) {
+    const uint8_t *data;
+    Py_ssize_t size;
+
+    if (!PyArg_ParseTuple(args, "y#", &data, &size))
+        return NULL;
+
+    dfu_status_ready = 0;
+    dfu_status_error = 0;
+
+    EM_ASM({
+        vialgluejs_dfu_flash_start($0, $1);
+    }, data, (int)size);
+
+    return PyLong_FromLong(0);
+}
+
+// Called from Python (polling loop): dfu_flash_status() -> str (JSON)
+// Blocks (spinlock) until the main thread delivers a status update.
+static PyObject * vialglue_dfu_flash_status(PyObject *self, PyObject *args) {
+    while (!dfu_status_ready) { /* spinlock */ }
+    dfu_status_ready = 0;
+    return PyUnicode_FromString(dfu_status_buf);
+}
+
+// Called from Python: dfu_request_usb() -> None
+// Triggers navigator.usb.requestDevice() on the main thread (needs user gesture
+// to have been set up; the main thread will pop a "Connect DFU device" dialog).
+static PyObject * vialglue_dfu_request_usb(PyObject *self, PyObject *args) {
+    dfu_status_ready = 0;
+    dfu_status_error = 0;
+
+    EM_ASM({
+        postMessage({cmd: "dfu_request_usb"});
+    });
+
+    return PyLong_FromLong(0);
+}
+
+// Called from Python after a web DFU flash to reconnect the keyboard via WebHID.
+// Triggers navigator.hid.requestDevice() on the main thread and blocks (spinlock)
+// until the main thread posts back a dfu_status of {"status":"reconnected"} or
+// {"status":"error","msg":"..."}.
+static PyObject * vialglue_request_reconnect(PyObject *self, PyObject *args) {
+    dfu_status_ready = 0;
+    dfu_status_error = 0;
+
+    EM_ASM({
+        postMessage({cmd: "dfu_request_reconnect"});
+    });
+
+    // Spinlock: wait for main thread to post back the result
+    while (!dfu_status_ready) { /* spinlock */ }
+    dfu_status_ready = 0;
+    return PyUnicode_FromString(dfu_status_buf);
 }
 
 static PyObject* vialglue_fatal_error(PyObject *self, PyObject *args) {
@@ -176,8 +261,13 @@ static PyMethodDef VialglueMethods[] = {
     {"notify_ready",  vialglue_notify_ready, METH_VARARGS, ""},
     {"get_device_desc",  vialglue_get_device_desc, METH_VARARGS, ""},
     {"load_layout",  vialglue_load_layout, METH_VARARGS, ""},
+    {"load_firmware_bin", vialglue_load_firmware_bin, METH_VARARGS, ""},
     {"save_layout",  vialglue_save_layout, METH_VARARGS, ""},
     {"fatal_error",  vialglue_fatal_error, METH_VARARGS, ""},
+    {"dfu_flash_start",    vialglue_dfu_flash_start,    METH_VARARGS, ""},
+    {"dfu_flash_status",   vialglue_dfu_flash_status,   METH_VARARGS, ""},
+    {"dfu_request_usb",    vialglue_dfu_request_usb,    METH_VARARGS, ""},
+    {"request_reconnect",  vialglue_request_reconnect,  METH_VARARGS, ""},
     {NULL, NULL, 0, NULL}
 };
 
