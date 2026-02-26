@@ -166,9 +166,12 @@ dfu.Device.prototype.abort = function() {
     return this.requestOut(dfu.ABORT);
 };
 
-dfu.Device.prototype.poll_until = async function(predicate) {
+dfu.Device.prototype.poll_until = async function(predicate, timeoutMs) {
+    const deadline = Date.now() + (timeoutMs || 30000); // default 30 s
     let status;
     do {
+        if (Date.now() > deadline)
+            throw new Error("poll_until timed out after " + (timeoutMs || 30000) + " ms");
         for (let retry = 0; retry < 5; retry++) {
             try { status = await this.getStatus(); break; } catch(e) {}
         }
@@ -313,6 +316,26 @@ dfuse.parseMemoryDescriptor = function(desc) {
     return { name, segments };
 };
 
+// ── STM32F4 fallback sector layout (used when altName is empty) ───────────
+// Internal Flash: 4×16K, 1×64K, 7×128K — total 1 MB starting at 0x08000000
+dfuse.STM32F4_SECTORS = (function() {
+    let segs = [];
+    let addr = 0x08000000;
+    const layout = [
+        { count: 4,  size: 16   * 1024 },
+        { count: 1,  size: 64   * 1024 },
+        { count: 7,  size: 128  * 1024 },
+    ];
+    for (let g of layout) {
+        for (let i = 0; i < g.count; i++) {
+            segs.push({ start: addr, end: addr + g.size, sectorSize: g.size,
+                        readable: true, erasable: true, writable: true });
+            addr += g.size;
+        }
+    }
+    return segs;
+})();
+
 // ── dfuse.Device ───────────────────────────────────────────────────────────
 dfuse.Device = function(device, settings) {
     dfu.Device.call(this, device, settings);
@@ -321,10 +344,21 @@ dfuse.Device = function(device, settings) {
     // Parse memory layout from the interface alternate name
     // e.g. "@Internal Flash /0x08000000/01*016Ka,03*016Kg,01*064Kg,07*128Kg"
     const altName = settings.alternate.interfaceName || settings.alternate.name || "";
+    console.log("[vial][dfu] DfuSe altName:", JSON.stringify(altName));
     if (altName.startsWith("@")) {
         this.memoryInfo = dfuse.parseMemoryDescriptor(altName);
+        console.log("[vial][dfu] DfuSe memoryInfo segments:",
+            this.memoryInfo.segments.map(s =>
+                "0x" + s.start.toString(16) + "-0x" + s.end.toString(16) +
+                " sz=" + s.sectorSize + " r=" + s.readable +
+                " e=" + s.erasable + " w=" + s.writable
+            )
+        );
     } else {
-        this.memoryInfo = null;
+        // No DfuSe memory descriptor from the device — use STM32F4 hardcoded layout
+        // (4×16K + 1×64K + 7×128K at 0x08000000) so sector-by-sector erase works.
+        this.memoryInfo = { name: "Internal Flash (fallback)", segments: dfuse.STM32F4_SECTORS };
+        console.warn("[vial][dfu] DfuSe: no memory descriptor in altName — using hardcoded STM32F4 layout");
     }
 };
 dfuse.Device.prototype = Object.create(dfu.Device.prototype);
@@ -342,7 +376,9 @@ dfuse.Device.prototype.dfuseCommand = async function(command, param, paramLen) {
     if (paramLen === 1) view.setUint8(1, param);
     else if (paramLen === 4) view.setUint32(1, param, true);
     await this.download(buf, 0); // block 0 = special command
-    const status = await this.poll_until(s => s !== dfu.dfuDNBUSY);
+    // Sector erase on STM32F4 can take up to ~2.5s per 128K sector;
+    // allow 10s per command to handle worst-case slow flash.
+    const status = await this.poll_until(s => s !== dfu.dfuDNBUSY, 10000);
     if (status.status !== dfu.STATUS_OK)
         throw new Error(`DfuSe command 0x${command.toString(16)} failed: status=${status.status}`);
 };
@@ -361,19 +397,34 @@ dfuse.Device.prototype.getSectorStart = function(addr) {
 };
 
 dfuse.Device.prototype.getSectorEnd = function(addr) {
-    if (!this.memoryInfo) return addr + 1;
+    if (!this.memoryInfo) return addr; // sentinel: no info
     for (let seg of this.memoryInfo.segments) {
         if (addr >= seg.start && addr < seg.end) return seg.end;
     }
-    return addr + 1;
+    return addr; // sentinel: addr not in any known segment
 };
 
 dfuse.Device.prototype.erase = async function(startAddr, length) {
     let addr = startAddr;
     let end  = startAddr + length;
+
+    if (!this.memoryInfo || this.memoryInfo.segments.length === 0) {
+        throw new Error("Erase: no memory info available (this should not happen)");
+    }
+
     while (addr < end) {
+        const nextEnd = this.getSectorEnd(addr);
+        if (nextEnd <= addr) {
+            // getSectorEnd returned something ≤ addr — segment info is broken,
+            // bail out rather than spinning forever.
+            throw new Error("Erase: getSectorEnd(0x" + addr.toString(16) + ") = 0x" +
+                nextEnd.toString(16) + " (not advancing); memory descriptor may be wrong");
+        }
+        this.logMsg("Erasing sector at 0x" + addr.toString(16) +
+            " (size " + (nextEnd - addr) + " bytes)...");
         await this.dfuseCommand(dfuse.ERASE_SECTOR, addr, 4);
-        addr = this.getSectorEnd(addr);
+        addr = nextEnd;
+        if (this.logProgress) this.logProgress(addr - startAddr, end - startAddr);
     }
 };
 
