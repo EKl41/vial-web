@@ -174,10 +174,16 @@ body {
         _vialglue_set_response_error();
     }
 
+    // Timeout for HID read responses.  500ms is too short for wireless
+    // bridge dongles where the round-trip includes USB -> dongle -> 2.4GHz
+    // -> keyboard -> 2.4GHz -> dongle -> USB.  2000ms accommodates the
+    // wireless latency while still detecting genuinely lost packets.
+    var g_read_timeout_ms = 2000;
+
     function my_onmessage(e) {
         if (e.data.cmd == "write_device") {
             g_device.sendReport(0, new Uint8Array(e.data.data));
-            g_read_timeout = setTimeout(read_timeout, 500);
+            g_read_timeout = setTimeout(read_timeout, g_read_timeout_ms);
         } else if (e.data.cmd == "unlock_start") {
             console.log("[vial] unlock_start: showing unlock overlay");
             var u8 = new Uint8Array(e.data.data);
