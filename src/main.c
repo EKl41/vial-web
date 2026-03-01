@@ -39,8 +39,10 @@ static PyObject * vialglue_write_device(PyObject *self, PyObject *args) {
     if (!PyArg_ParseTuple(args, "y#", &data, &size))
         return NULL;
 
-    if (size != 33)
+    if (size != 33) {
+        PyErr_SetString(PyExc_ValueError, "expected exactly 33 bytes");
         return NULL;
+    }
 
     // printf("request to send data of size %d starting with %02X %02X %02X %02X\n", size, data[0], data[1], data[2], data[3]);
 
@@ -130,6 +132,10 @@ static PyObject * vialglue_notify_ready(PyObject *self, PyObject *args) {
 }
 
 static PyObject* vialglue_get_device_desc(PyObject *self, PyObject *args) {
+    if (g_device_desc == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "device descriptor not set");
+        return NULL;
+    }
     return PyUnicode_FromString(g_device_desc);
 }
 
