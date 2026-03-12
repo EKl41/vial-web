@@ -178,12 +178,12 @@ body {
     // bridge dongles where the round-trip includes USB -> dongle -> 2.4GHz
     // -> keyboard -> 2.4GHz -> dongle -> USB.  2000ms accommodates the
     // wireless latency while still detecting genuinely lost packets.
-    var g_read_timeout_ms = 2000;
+    // var g_read_timeout_ms = 2000;
 
     function my_onmessage(e) {
         if (e.data.cmd == "write_device") {
             g_device.sendReport(0, new Uint8Array(e.data.data));
-            g_read_timeout = setTimeout(read_timeout, g_read_timeout_ms);
+            g_read_timeout = setTimeout(read_timeout, 2000);
         } else if (e.data.cmd == "unlock_start") {
             console.log("[vial] unlock_start: showing unlock overlay");
             var u8 = new Uint8Array(e.data.data);
